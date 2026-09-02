@@ -158,7 +158,7 @@ async function handleNewCode(msg: TelegramBot.Message, match: RegExpExecArray | 
 
   if (arg) {
     const newCode = arg.toLowerCase() === "random"
-      ? String(Math.floor(100000 + Math.random() * 900000))
+      ? generateRandomCode()
       : /^\d{4,6}$/.test(arg) ? arg : null;
 
     if (!newCode) return bot.sendMessage(msg.chat.id, "Invalid code. Use 4-6 digits or 'random'.");
@@ -794,7 +794,7 @@ async function handleMessage(msg: TelegramBot.Message) {
 
 async function handleNewCodeFlow(chatId: number, text: string, p: PendingAction) {
   const code = text.toLowerCase() === "random"
-    ? String(Math.floor(100000 + Math.random() * 900000))
+    ? generateRandomCode()
     : /^\d{4,6}$/.test(text) ? text : null;
 
   if (!code) return bot.sendMessage(chatId, "Send 4-6 digits or 'random'. Type 'cancel' to abort.");
@@ -851,7 +851,7 @@ async function handleAddMemberFlow(chatId: number, text: string, p: PendingActio
     }
 
     case "awaiting_pincode": {
-      const pin = text.toLowerCase() === "random" ? String(Math.floor(100000 + Math.random() * 900000)) : /^\d{4,6}$/.test(text) ? text : null;
+      const pin = text.toLowerCase() === "random" ? generateRandomCode() : /^\d{4,6}$/.test(text) ? text : null;
       if (!pin) return bot.sendMessage(chatId, "Invalid. Enter 4-6 digits or 'random':");
       p.data.pinCode = pin;
       pending.delete(chatId);
