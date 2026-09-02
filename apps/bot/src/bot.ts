@@ -969,7 +969,7 @@ async function handleAddPassesFlow(chatId: number, text: string, p: PendingActio
 
 async function handleAddAdminFlow(chatId: number, text: string) {
   const tg = text.startsWith("@") ? text : `@${text}`;
-  const { data: member } = await db.from("members").select("id, name, is_admin").eq("telegram_username", tg).single();
+  const { data: member } = await db.from("members").select("id, name, is_admin").eq("telegram_username", tg).eq("disabled", false).single();
   if (!member) return bot.sendMessage(chatId, `${tg} not found. They must be registered first. Try again or 'cancel':`);
   if (member.is_admin) { clearPending(chatId); return bot.sendMessage(chatId, `${member.name} is already an admin.`); }
 
@@ -995,7 +995,8 @@ async function handleChangeTypeFlow(chatId: number, text: string, p: PendingActi
   if (p.step !== "awaiting_username") return;
 
   const tg = text.startsWith("@") ? text : `@${text}`;
-  const member = await findMemberByTelegram(tg.replace("@", ""));
+  // Admin tooling acting on a member — disabled rows stay reachable here.
+  const member = await findMemberByTelegram(tg.replace("@", ""), { includeDisabled: true });
   if (!member) return bot.sendMessage(chatId, `${tg} not found. Try again or 'cancel':`);
 
   const typeLabel =
@@ -1124,7 +1125,7 @@ async function handleCoop(msg: TelegramBot.Message, match: RegExpExecArray | nul
   }
 
   const tg = arg.startsWith("@") ? arg : `@${arg}`;
-  const member = await findMemberByTelegram(tg.replace("@", ""));
+  const member = await findMemberByTelegram(tg.replace("@", ""), { includeDisabled: true });
   if (!member) return bot.sendMessage(msg.chat.id, `${tg} not found.`);
 
   const newStatus = !member.is_coop_member;
