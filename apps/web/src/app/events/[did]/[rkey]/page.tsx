@@ -58,7 +58,7 @@ export default async function EventDetailPage({ params }: PageProps) {
   const location = event.location ? formatLocation(event.location) : "";
 
   return (
-    <div className="min-h-screen px-6 py-12">
+    <div className="px-6 py-12">
       <div className="max-w-3xl mx-auto space-y-8">
         <p className="text-sm">
           <Link

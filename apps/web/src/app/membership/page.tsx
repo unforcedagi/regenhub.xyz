@@ -85,7 +85,7 @@ export default async function MembershipPage({ searchParams }: PageProps) {
   );
 
   return (
-    <div className="min-h-screen px-6 py-12">
+    <div className="px-6 py-12">
       <div className="max-w-5xl mx-auto space-y-12">
         <header className="text-center space-y-3">
           <p className="text-sm text-sage uppercase tracking-wider flex items-center justify-center gap-2">
