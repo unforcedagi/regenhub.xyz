@@ -342,7 +342,34 @@ export async function setAutomationEnabled(entityId: string, enabled: boolean): 
   }
 }
 
-/** The auto-lock automation entity. Override via AUTO_LOCK_AUTOMATION_ENTITY. */
-export function autoLockAutomationEntity(): string {
+/** Front Yale: native auto-relock owns relocking. Software must not lock.lock it. */
+export function isFrontLockEntity(entity: string): boolean {
+  return entity.includes("front");
+}
+
+/** Drop front-door entities so crash-recovery never motors that bolt. */
+export function withoutFrontLocks(entities: string[]): string[] {
+  return entities.filter((e) => !isFrontLockEntity(e));
+}
+
+/**
+ * YAML automation that still lists both doors. It fights the front lock's
+ * native 30s relock (jam/beep). Keep it off; do not re-arm it.
+ * Override via AUTO_LOCK_AUTOMATION_ENTITY.
+ */
+export function bothDoorsAutoLockAutomationEntity(): string {
   return process.env.AUTO_LOCK_AUTOMATION_ENTITY ?? "automation.auto_lock_doors_after_5_minutes";
+}
+
+/** Back-door-only 5-min locker. Holds and watchdogs use this. */
+export function backAutoLockAutomationEntity(): string {
+  return (
+    process.env.BACK_AUTO_LOCK_AUTOMATION_ENTITY ??
+    "automation.auto_lock_back_door_after_5_minutes_3"
+  );
+}
+
+/** @deprecated Use bothDoorsAutoLockAutomationEntity / backAutoLockAutomationEntity. */
+export function autoLockAutomationEntity(): string {
+  return bothDoorsAutoLockAutomationEntity();
 }
