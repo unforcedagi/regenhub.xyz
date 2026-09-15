@@ -99,7 +99,7 @@ async function handleHelp(msg: TelegramBot.Message) {
     text += `\n🛡️ *Admin*\n`;
     text += `/quickcode — Create a quick door code\n`;
     text += `/codes — List & revoke active codes\n`;
-    text += `/holdopen [front|back|both] [2h] — Hold door(s) unlocked for an event\n`;
+    text += `/holdopen back [2h] — Hold the back door unlocked for an event (front auto-relocks itself)\n`;
     text += `/relock — End any hold + lock all doors\n`;
     text += `/changetype — Change a member's type\n`;
     text += `/coop — Toggle co-op member status\n`;

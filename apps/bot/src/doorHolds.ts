@@ -7,17 +7,22 @@ import {
   formatLockStatus,
   getEntityState,
   setAutomationEnabled,
-  autoLockAutomationEntity,
+  backAutoLockAutomationEntity,
+  bothDoorsAutoLockAutomationEntity,
+  withoutFrontLocks,
 } from "@regenhub/shared";
 
 /**
  * Door hold-opens — "happy hour mode".
  *
- * /holdopen [front|back|both] [duration]  — keep door(s) unlocked
- * /relock                                  — end all holds, lock everything
+ * /holdopen back [duration]  — keep the BACK door unlocked
+ * /relock                    — end all holds, lock everything
+ *
+ * Front door is native-relock only (~30s hardware). /holdopen front|both
+ * refuse. Crash recovery must never lock.lock the front bolt.
  *
  * BATTERY + SAFETY MODEL:
- * On hold start we SUSPEND Home Assistant's auto-lock automation and unlock
+ * On hold start we SUSPEND the back-door HA auto-lock automation and unlock
  * once — two motor actuations per event total (open at start, lock at end),
  * zero Z-Wave radio chatter in between. The keep-alive tick only READS lock
  * state from HA's cache (no radio); it re-unlocks only if someone manually
@@ -25,10 +30,12 @@ import {
  *
  * Because the automation is suspended, "what if the bot dies" is covered by
  * layers instead of polling:
- *   1. this loop relocks + re-arms the automation at expiry
+ *   1. this loop relocks + re-arms the BACK auto-lock at expiry
  *   2. the web app's door-watchdog cron (separate container, every 5 min)
- *      re-arms + locks if it sees the automation off with no active hold
- *   3. an HA-native failsafe automation re-arms after 6h off, no matter what
+ *      re-arms + locks the back door if that automation is off with no hold
+ *   3. the both-doors 5-min YAML automation is kept OFF (it fights the front
+ *      lock's native relock). YAML still has to drop the front entity so a
+ *      HA restart does not turn it back on.
  */
 
 const TICK_MS = 4 * 60 * 1000;
@@ -87,12 +94,14 @@ async function releaseHold(id: number, reason: string) {
     .eq("id", id);
 }
 
-/** End-of-hold sequence: lock doors, re-arm auto-lock. Returns lock results message. */
+/** End-of-hold sequence: lock doors (never front), re-arm BACK auto-lock. */
 async function endHold(doors: string[]): Promise<{ ok: boolean; statusMsg: string }> {
-  const results = await lockDoors(doors);
-  const rearmed = await setAutomationEnabled(autoLockAutomationEntity(), true);
+  const toLock = withoutFrontLocks(doors);
+  const results = toLock.length > 0 ? await lockDoors(toLock) : [];
+  await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+  const rearmed = await setAutomationEnabled(backAutoLockAutomationEntity(), true);
   const ok = results.every((r) => r.ok) && rearmed;
-  const statusMsg = `${formatLockStatus(results)}${rearmed ? "" : " · ⚠️ auto-lock automation re-arm FAILED"}`;
+  const statusMsg = `${toLock.length > 0 ? formatLockStatus(results) : "front skipped (native relock)"}${rearmed ? "" : " · ⚠️ back auto-lock re-arm FAILED"}`;
   return { ok, statusMsg };
 }
 
@@ -112,7 +121,7 @@ export async function handleHoldOpen(
   }
 
   const args = (match?.[1] ?? "").trim().split(/\s+/).filter(Boolean);
-  let which: "front" | "back" | "both" = "both";
+  let which: "front" | "back" | "both" = "back";
   let durationArg: string | undefined;
   for (const a of args) {
     const al = a.toLowerCase();
@@ -122,7 +131,14 @@ export async function handleHoldOpen(
 
   const durationMs = parseDuration(durationArg);
   if (durationMs === null) {
-    return bot.sendMessage(chatId, "Couldn't parse that duration. Try: /holdopen both 2h  ·  /holdopen front 90m");
+    return bot.sendMessage(chatId, "Couldn't parse that duration. Try: /holdopen back 2h");
+  }
+
+  if (which !== "back") {
+    return bot.sendMessage(
+      chatId,
+      "Front door holds are off — that lock auto-relocks itself in ~30 seconds. Back only: /holdopen back 2h",
+    );
   }
 
   const entities = resolveDoorEntities(which);
@@ -149,17 +165,18 @@ export async function handleHoldOpen(
     return bot.sendMessage(chatId, "Couldn't save the hold — doors NOT held. Try again.");
   }
 
-  // Suspend auto-lock FIRST, then unlock — otherwise the automation could
-  // relock between our unlock and the suspend.
-  const suspended = await setAutomationEnabled(autoLockAutomationEntity(), false);
+  // Suspend back auto-lock FIRST, then unlock. Keep the both-doors YAML
+  // locker off — it still targets the front bolt.
+  await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+  const suspended = await setAutomationEnabled(backAutoLockAutomationEntity(), false);
   const results = await unlockDoors(entities);
   const okCount = results.filter((r) => r.ok).length;
 
   if (okCount === 0) {
     const fresh = await activeHolds();
     for (const h of fresh) await releaseHold(h.id, "unlock_failed");
-    await setAutomationEnabled(autoLockAutomationEntity(), true);
-    return bot.sendMessage(chatId, `⚠️ Couldn't unlock ${doorLabel(entities)} — ${formatLockStatus(results)}. No hold active; auto-lock re-armed.`);
+    await setAutomationEnabled(backAutoLockAutomationEntity(), true);
+    return bot.sendMessage(chatId, `⚠️ Couldn't unlock ${doorLabel(entities)} — ${formatLockStatus(results)}. No hold active; back auto-lock re-armed.`);
   }
 
   const capNote = durationArg && parseDuration(durationArg)! >= MAX_HOURS * 3_600_000
@@ -174,9 +191,9 @@ export async function handleHoldOpen(
       `Unlocked until *${fmtTime(until)}*${capNote}, then auto-relocks.`,
       `Started by ${member.name}.`,
       ``,
-      `Auto-lock is suspended for the duration (battery-friendly — no motor cycling). I'll warn here 10 minutes before relocking.`,
+      `Back auto-lock is suspended for the duration (battery-friendly — no motor cycling). I'll warn here 10 minutes before relocking.`,
       `End early any time with /relock.`,
-      !suspended ? `\n⚠️ Couldn't suspend the auto-lock automation — the door may relock itself in ~5 min. Check HA.` : ``,
+      !suspended ? `\n⚠️ Couldn't suspend the back auto-lock automation — the door may relock itself in ~5 min. Check HA.` : ``,
       formatLockStatus(results).includes("fail") ? `\n⚠️ Note: ${formatLockStatus(results)}` : ``,
     ].filter(Boolean).join("\n"),
     { parse_mode: "Markdown" },
@@ -194,17 +211,30 @@ export async function handleRelock(bot: TelegramBot, msg: TelegramBot.Message) {
   }
 
   const holds = await activeHolds();
-  const entities = holds.length > 0
-    ? Array.from(new Set(holds.flatMap((h) => h.doors)))
-    : resolveDoorEntities("both"); // no hold? /relock is also a panic button
-
   for (const h of holds) await releaseHold(h.id, "manual");
-  const { ok, statusMsg } = await endHold(entities);
 
+  if (holds.length > 0) {
+    const entities = withoutFrontLocks(Array.from(new Set(holds.flatMap((h) => h.doors))));
+    const { ok, statusMsg } = await endHold(entities);
+    return bot.sendMessage(
+      chatId,
+      ok
+        ? `🔒 ${doorLabel(entities)} locked — hold ended by ${member.name}. Back auto-lock re-armed. (${statusMsg})`
+        : `⚠️ Relock issues for ${doorLabel(entities)}: ${statusMsg}. CHECK THE DOORS.`,
+    );
+  }
+
+  // Panic button: lock every door, including front.
+  const entities = resolveDoorEntities("both");
+  const results = await lockDoors(entities);
+  await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+  const rearmed = await setAutomationEnabled(backAutoLockAutomationEntity(), true);
+  const ok = results.every((r) => r.ok) && rearmed;
+  const statusMsg = `${formatLockStatus(results)}${rearmed ? "" : " · ⚠️ back auto-lock re-arm FAILED"}`;
   return bot.sendMessage(
     chatId,
     ok
-      ? `🔒 ${doorLabel(entities)} locked${holds.length > 0 ? ` — hold ended by ${member.name}` : ""}. Auto-lock re-armed. (${statusMsg})`
+      ? `🔒 ${doorLabel(entities)} locked. Back auto-lock re-armed. (${statusMsg})`
       : `⚠️ Relock issues for ${doorLabel(entities)}: ${statusMsg}. CHECK THE DOORS.`,
   );
 }
@@ -217,8 +247,8 @@ export async function handleRelock(bot: TelegramBot, msg: TelegramBot.Message) {
  *  - holds expiring within 10 min → one-time warning
  *  - active holds → READ each door's state from HA cache (no radio);
  *    re-unlock only doors that read "locked" (someone thumb-turned them)
- *  - no holds → verify auto-lock automation is armed (cheap state read);
- *    re-arm if a crash left it off
+ *  - no holds → keep both-doors YAML locker OFF; re-arm BACK auto-lock
+ *    if a crash left it off (never lock.lock the front door)
  */
 export function startDoorHoldLoop(bot: TelegramBot) {
   const groupChat = process.env.TELEGRAM_GROUP_CHAT_ID;
@@ -247,27 +277,39 @@ export function startDoorHoldLoop(bot: TelegramBot) {
       const now = Date.now();
 
       if (holds.length === 0) {
-        // Reconcile: if a crash left the automation suspended, re-arm it.
-        const state = await getEntityState(autoLockAutomationEntity());
-        if (state === "off") {
-          await setAutomationEnabled(autoLockAutomationEntity(), true);
-          await lockDoors(resolveDoorEntities("both"));
-          await notify(null, "🛡️ Door watchdog (bot): auto-lock was suspended with no active hold — re-armed and locked the doors.");
+        const bothDoors = await getEntityState(bothDoorsAutoLockAutomationEntity());
+        if (bothDoors === "on") {
+          await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+          await notify(null, "🛡️ Front native-relock: turned off the both-doors 5-min locker (it was fighting the front bolt).");
+        }
+        const backState = await getEntityState(backAutoLockAutomationEntity());
+        if (backState === "off") {
+          await setAutomationEnabled(backAutoLockAutomationEntity(), true);
+          const back = withoutFrontLocks(resolveDoorEntities("both"));
+          if (back.length > 0) await lockDoors(back);
+          await notify(null, "🛡️ Door watchdog (bot): back auto-lock was off with no active hold — re-armed and locked the back door.");
         }
         return;
       }
 
+      await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+
       for (const hold of holds) {
+        const doors = withoutFrontLocks(hold.doors);
+        if (doors.length === 0) {
+          await releaseHold(hold.id, "front_native_relock");
+          continue;
+        }
         const untilMs = new Date(hold.hold_until).getTime();
 
         if (now >= untilMs) {
           await releaseHold(hold.id, "expired");
-          const { ok, statusMsg } = await endHold(hold.doors);
+          const { ok, statusMsg } = await endHold(doors);
           await notify(
             hold.notify_chat_id,
             ok
-              ? `🔒 Hold-open ended — ${doorLabel(hold.doors)} relocked on schedule.`
-              : `🚨 Hold-open ended but relock had problems for ${doorLabel(hold.doors)}: ${statusMsg}. PLEASE CHECK THE DOORS.`,
+              ? `🔒 Hold-open ended — ${doorLabel(doors)} relocked on schedule.`
+              : `🚨 Hold-open ended but relock had problems for ${doorLabel(doors)}: ${statusMsg}. PLEASE CHECK THE DOORS.`,
           );
           continue;
         }
@@ -277,7 +319,7 @@ export function startDoorHoldLoop(bot: TelegramBot) {
           // a transient failure would suppress the warning permanently.
           const delivered = await notify(
             hold.notify_chat_id,
-            `⏰ ${doorLabel(hold.doors)} relocks at ${fmtTime(new Date(untilMs))} (~10 min). Extend with /holdopen, or /relock to end now.`,
+            `⏰ ${doorLabel(doors)} relocks at ${fmtTime(new Date(untilMs))} (~10 min). Extend with /holdopen back, or /relock to end now.`,
           );
           if (delivered) {
             await db.from("door_holds").update({ warned_at: new Date().toISOString() }).eq("id", hold.id);
@@ -286,7 +328,7 @@ export function startDoorHoldLoop(bot: TelegramBot) {
 
         // State VERIFY (HA cache read, no Z-Wave traffic). Re-unlock only
         // doors that somehow relocked (manual thumb-turn, HA restart, etc).
-        for (const door of hold.doors) {
+        for (const door of doors) {
           const state = await getEntityState(door);
           if (state === "locked") {
             await unlockDoors([door]);

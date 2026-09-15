@@ -3,27 +3,32 @@ import { createServiceClient } from "@/lib/supabase/admin";
 import {
   getEntityState,
   setAutomationEnabled,
-  autoLockAutomationEntity,
+  backAutoLockAutomationEntity,
+  bothDoorsAutoLockAutomationEntity,
   lockDoors,
   getLockEntities,
+  withoutFrontLocks,
 } from "@regenhub/shared";
 
 /**
  * POST /api/cron/door-watchdog
  *
- * Layer-2 failsafe for door hold-opens (layer 1 is the bot's own loop;
- * layer 3 is an HA-native 6h automation). Runs every 5 minutes from Coolify
- * in the WEB container — a separate process from the bot, so a dead bot
- * can't take the watchdog down with it.
+ * Layer-2 failsafe for door hold-opens (layer 1 is the bot's own loop).
+ * Runs every 5 minutes from Coolify in the WEB container — a separate
+ * process from the bot, so a dead bot can't take the watchdog down with it.
+ *
+ * Front door is native-relock only. This cron must never lock.lock it, and
+ * must keep the both-doors YAML 5-min automation OFF (that automation still
+ * lists the front lock and is the jam/beep loop).
  *
  * Logic:
- *  - If HA's auto-lock automation is OFF and there is NO active unexpired
- *    hold in door_holds → something crashed mid-hold. Re-arm the automation,
- *    lock all doors, release any stale hold rows, alert Telegram.
+ *  - Keep both-doors YAML locker off.
  *  - If a hold row is past its hold_until but unreleased (bot died before
- *    expiry processing) → same cleanup.
- *  - Otherwise no-op. Zero Z-Wave traffic on the happy path (one HA cache
- *    read + one DB query).
+ *    expiry processing) → lock those doors except front, re-arm BACK auto-lock,
+ *    alert Telegram.
+ *  - If BACK auto-lock is OFF and there is NO active unexpired hold →
+ *    re-arm it, lock the back door, alert Telegram.
+ *  - Otherwise no-op on the happy path (HA cache reads + one DB query).
  *
  * Auth: Authorization: Bearer ${CRON_SECRET}
  */
@@ -52,8 +57,9 @@ export async function POST(req: Request) {
   const admin = createServiceClient();
   const nowIso = new Date().toISOString();
 
-  const [autoLockState, { data: holds }] = await Promise.all([
-    getEntityState(autoLockAutomationEntity()),
+  const [bothDoorsState, backState, { data: holds }] = await Promise.all([
+    getEntityState(bothDoorsAutoLockAutomationEntity()),
+    getEntityState(backAutoLockAutomationEntity()),
     admin.from("door_holds").select("id, doors, hold_until").is("released_at", null),
   ]);
 
@@ -61,6 +67,14 @@ export async function POST(req: Request) {
   const expiredUnreleased = (holds ?? []).filter((h) => h.hold_until <= nowIso);
 
   let acted = false;
+
+  if (bothDoorsState === "on") {
+    acted = true;
+    await setAutomationEnabled(bothDoorsAutoLockAutomationEntity(), false);
+    await notifyTelegram(
+      "🛡️ Front native-relock: turned off the both-doors 5-min locker (it was fighting the front bolt).",
+    );
+  }
 
   // Stale holds the bot never processed (bot dead at expiry)
   if (expiredUnreleased.length > 0) {
@@ -71,26 +85,30 @@ export async function POST(req: Request) {
         .update({ released_at: nowIso, released_reason: "watchdog" })
         .eq("id", h.id);
     }
-    const doors = Array.from(new Set(expiredUnreleased.flatMap((h) => h.doors)));
-    await lockDoors(doors);
-    await setAutomationEnabled(autoLockAutomationEntity(), true);
+    const doors = withoutFrontLocks(
+      Array.from(new Set(expiredUnreleased.flatMap((h) => h.doors))),
+    );
+    if (doors.length > 0) await lockDoors(doors);
+    await setAutomationEnabled(backAutoLockAutomationEntity(), true);
     await notifyTelegram(
-      `🛡️ Door watchdog: a hold-open expired but wasn't processed (bot down?). Locked ${doors.length > 1 ? "the doors" : "the door"} + re-armed auto-lock.`,
+      `🛡️ Door watchdog: a hold-open expired but wasn't processed (bot down?). Locked ${doors.length > 1 ? "the doors" : doors.length === 1 ? "the door" : "nothing (front skipped)"} + re-armed back auto-lock.`,
     );
   }
 
-  // Automation off with no legitimate reason
-  if (autoLockState === "off" && activeUnexpired.length === 0 && expiredUnreleased.length === 0) {
+  // Back auto-lock off with no legitimate hold
+  if (backState === "off" && activeUnexpired.length === 0 && expiredUnreleased.length === 0) {
     acted = true;
-    await setAutomationEnabled(autoLockAutomationEntity(), true);
-    await lockDoors(getLockEntities());
+    await setAutomationEnabled(backAutoLockAutomationEntity(), true);
+    const back = withoutFrontLocks(getLockEntities());
+    if (back.length > 0) await lockDoors(back);
     await notifyTelegram(
-      "🛡️ Door watchdog: auto-lock automation was off with no active hold — re-armed it and locked the doors.",
+      "🛡️ Door watchdog: back auto-lock was off with no active hold — re-armed it and locked the back door.",
     );
   }
 
   return NextResponse.json({
-    auto_lock_state: autoLockState,
+    both_doors_auto_lock_state: bothDoorsState,
+    back_auto_lock_state: backState,
     active_holds: activeUnexpired.length,
     cleaned_stale_holds: expiredUnreleased.length,
     acted,
