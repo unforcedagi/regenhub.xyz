@@ -91,13 +91,19 @@ const STRIP_REQUEST = new Set([
   "x-vercel-ip-country",
 ]);
 // Response headers we must NOT copy back (Next re-computes encoding/length;
-// set-cookie is filtered and re-emitted via getSetCookie below). The whole
+// set-cookie is filtered and re-emitted via getSetCookie below, and never
 // access-control-* family is also dropped (see STRIP_RESPONSE_PREFIX): the
 // AppView answers CORS for its OWN frontends, and re-publishing that grant
 // under regenhub.xyz would let a third origin make credentialed calls against
 // session-bearing endpoints here. Same-origin is the whole design; the
 // browser never needs a preflight to reach its own site.
-const STRIP_RESPONSE = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
+const STRIP_RESPONSE = new Set([
+  "content-encoding",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "set-cookie",
+]);
 const STRIP_RESPONSE_PREFIX = "access-control-";
 
 /**
