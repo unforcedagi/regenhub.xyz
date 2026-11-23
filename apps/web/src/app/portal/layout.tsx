@@ -10,6 +10,8 @@ import { currentTechne } from "@/lib/techne/webSession";
 import { stewardCheck } from "@/lib/techne/roster";
 import { regenosCollectiveDid } from "@/lib/regenos/config";
 import { SignOutButton } from "@/components/auth/SignOutButton";
+import { currentViewAs, previewFrame } from "@/lib/viewAsServer";
+import { NotInPreview, ViewAsBar } from "@/components/portal/ViewAsBar";
 
 export const metadata = { title: "Member Portal — RegenHub" };
 
@@ -25,25 +27,34 @@ export default async function PortalLayout({ children }: { children: React.React
 
   if (!user) redirect(loginUrlFor(path));
 
-  const { data: member } = await supabase
+  // An admin viewing the portal as someone else (lib/viewAs.ts): their menu, not the admin's, and only the pages the
+  // preview shows (the home); any other portal page would show the admin's own account, so it is held back.
+  const viewAs = await currentViewAs();
+  const preview = viewAs ? await previewFrame(viewAs) : null;
+
+  const { data: member } = preview ? { data: null } : await supabase
     .from("members")
     .select("is_admin, disabled, member_type")
     .eq("supabase_user_id", user.id)
     .single();
 
   // Matches the admin layout's gate: disabling a member also removes admin.
-  const isAdmin = !!member?.is_admin && !member.disabled;
+  const isAdmin = !preview && !!member?.is_admin && !member.disabled;
+  const memberType = preview ? preview.memberType : member?.member_type;
+  const events = preview ? preview.steward : await showEvents(door);
 
   const links: NavLink[] = [
     { href: "/portal", label: "Home" },
     // One page, named for what it holds: passes for your guests, or a daily member's own day passes.
-    { href: "/portal/passes", label: member?.member_type === "day_pass" ? "Day passes" : "Guest passes" },
-    ...((await showEvents(door)) ? [{ href: door ? STEWARD_PATH : "/portal/events", label: "Events" }] : []),
+    { href: "/portal/passes", label: memberType === "day_pass" ? "Day passes" : "Guest passes" },
+    ...(events ? [{ href: door ? STEWARD_PATH : "/portal/events", label: "Events" }] : []),
     ...(isAdmin ? [{ href: "/admin", label: "Admin", accent: true }] : []),
   ];
+  const onHome = /^\/portal\/?(\?|$)/.test(path ?? "");
 
   return (
     <div className="min-h-screen" data-surface="work">
+      {preview && <ViewAsBar label={preview.label} />}
       <header className="sticky top-0 z-50 px-6 py-3">
         <nav className="glass-panel-subtle max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-6">
@@ -67,7 +78,7 @@ export default async function PortalLayout({ children }: { children: React.React
           <SignOutButton className="hidden sm:block" />
         </nav>
       </header>
-      <main className="max-w-7xl mx-auto px-6 py-8">{children}</main>
+      <main className="max-w-7xl mx-auto px-6 py-8">{preview && !onHome ? <NotInPreview /> : children}</main>
     </div>
   );
 }
